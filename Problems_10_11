@@ -1,0 +1,329 @@
+import math
+
+filename = "InputExample.txt"
+distance_threshold = 30.0
+
+class City:
+    """
+    Immutable representation of a city.
+    """
+    def __init__(self, name: str, population: int, longitude: float, latitude: float):
+        if population < 0:
+            raise ValueError("Population must be non-negative")
+
+        self.name = name
+        self.population = population
+        self.longitude = longitude
+        self.latitude = latitude
+
+    def __repr__(self):
+        return f"City({self.name})"
+
+
+def dist(city1: City, city2: City) -> float:
+    """
+    Uses the Haversine formula.
+    """
+    # Earth radius in kilometers
+    R = 6371.0
+
+    lat1 = math.radians(city1.latitude)
+    lon1 = math.radians(city1.longitude)
+    lat2 = math.radians(city2.latitude)
+    lon2 = math.radians(city2.longitude)
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+class CityGraph:
+    """
+    Undirected graph of cities.
+    Nodes are city names.
+    Edges represent geographic proximity.
+    """
+
+    def __init__(self, cities: list[City], distance_threshold: float):
+        self.cities = cities
+        self.threshold = distance_threshold
+
+        if distance_threshold <= 0:
+            print("Warning: distance threshold should be positive.")
+
+        # adjacency list: city name -> set of neighboring city names
+        self.adjacency = {city.name: set() for city in cities}
+
+        self.build_graph()
+
+    def build_graph(self):
+        n = len(self.cities)
+
+        if n == 0:
+            print("Warning: empty city list, graph not built.")
+            return
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                city_i = self.cities[i]
+                city_j = self.cities[j]
+
+                d = haversine_distance(city_i, city_j)
+
+                if d <= self.threshold:
+                    self.adjacency[city_i.name].add(city_j.name)
+                    self.adjacency[city_j.name].add(city_i.name)
+
+    def number_of_vertices(self) -> int:
+        return len(self.adjacency)
+
+    def number_of_edges(self) -> int:
+        return sum(len(neighbors) for neighbors in self.adjacency.values()) // 2
+
+    def neighbors(self, city_name: str) -> set[str]:
+        if city_name not in self.adjacency:
+            print(f"Warning: city '{city_name}' not in graph.")
+            return set()
+        return self.adjacency[city_name]
+
+    def print_graph(self):
+        print("\nCity graph (adjacency list):")
+        for city, neighbors in self.adjacency.items():
+            print(f"{city}: {sorted(neighbors)}")
+
+
+def read_cities_from_file(path: str) -> list[City]:
+    cities = []
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            raw_lines = file.readlines()
+    except OSError:
+        print("Error: cannot open input file.")
+        return []
+
+    # Remove empty / whitespace-only lines
+    lines = [line.strip() for line in raw_lines if line.strip() != ""]
+
+    if len(lines) == 0:
+        print("Error: empty input file.")
+        return []
+
+    try:
+        n = int(lines[0])
+    except ValueError:
+        print("Error: first non-empty line must be an integer (number of cities).")
+        return []
+
+    if len(lines) < n + 1:
+        print("Warning: fewer city lines than expected.")
+
+    names_seen = set()
+
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) != 4:
+            print(f"Skipping invalid line: {line}")
+            continue
+
+        try:
+            name = parts[0]
+            population = int(parts[1])
+            longitude = float(parts[2])
+            latitude = float(parts[3])
+        except ValueError:
+            print(f"Skipping invalid data: {line}")
+            continue
+
+        if name in names_seen:
+            print(f"Skipping duplicate city: {name}")
+            continue
+
+        names_seen.add(name)
+        cities.append(City(name, population, longitude, latitude))
+
+    return cities
+
+def compute_payoff(
+    firm1_city: City,
+    firm2_city: City,
+    cities: list[City],
+    distance_threshold: float
+) -> tuple[float, float]:
+    """
+    Computes payoffs for two firms choosing locations firm1_city and firm2_city.
+    No epsilon tolerance is used for distance comparison.
+    """
+
+    payoff_1 = 0.0
+    payoff_2 = 0.0
+
+    for city in cities:
+        d1 = dist(firm1_city, city)
+        d2 = dist(firm2_city, city)
+
+        # Nobody reaches the city
+        if d1 > distance_threshold and d2 > distance_threshold:
+            continue
+
+        # Only firm 1 reaches
+        if d1 <= distance_threshold and d2 > distance_threshold:
+            payoff_1 += city.population
+            continue
+
+        # Only firm 2 reaches
+        if d2 <= distance_threshold and d1 > distance_threshold:
+            payoff_2 += city.population
+            continue
+
+        # Both reach the city
+        if d1 == d2:
+            payoff_1 += city.population / 2
+            payoff_2 += city.population / 2
+        elif d1 < d2:
+            payoff_1 += city.population
+        else:
+            payoff_2 += city.population
+
+    return payoff_1, payoff_2
+
+def build_payoff_matrix(
+    cities: List[City],
+    distance_threshold: float
+) -> Dict[str, Dict[str, Tuple[float, float]]]:
+    """
+    payoff[i][j] = (payoff_firm1, payoff_firm2)
+    """
+
+    payoff = {}
+
+    for city_i in cities:
+        payoff[city_i.name] = {}
+        for city_j in cities:
+            payoff[city_i.name][city_j.name] = compute_payoff(
+                city_i, city_j, cities, distance_threshold
+            )
+
+    return payoff
+
+def strictly_dominates(
+    a: str,
+    b: str,
+    strategies_1: list[str],
+    strategies_2: list[str],
+    payoff: dict,
+    player: int
+) -> bool:
+    """
+    Checks whether strategy a strictly dominates strategy b
+    for the given player.
+    """
+
+    if player == 0:
+        # Firm 1: compare rows
+        for t in strategies_2:
+            if payoff[a][t][0] <= payoff[b][t][0]:
+                return False
+        return True
+
+    else:
+        # Firm 2: compare columns
+        for s in strategies_1:
+            if payoff[s][a][1] <= payoff[s][b][1]:
+                return False
+        return True
+
+
+def iterated_elimination(cities, payoff):
+    strategies_1 = [c.name for c in cities]
+    strategies_2 = [c.name for c in cities]
+
+    while True:
+        removed_any = False
+
+        # Firm 1
+        remove_1 = []
+        for s in strategies_1:
+            for s_alt in strategies_1:
+                if s != s_alt and strictly_dominates(
+                    s_alt, s,
+                    strategies_1, strategies_2,
+                    payoff, player=0
+                ):
+                    remove_1.append(s)
+                    break
+
+        if remove_1:
+            for s in remove_1:
+                strategies_1.remove(s)
+            removed_any = True
+
+        # Firm 2
+        remove_2 = []
+        for t in strategies_2:
+            for t_alt in strategies_2:
+                if t != t_alt and strictly_dominates(
+                    t_alt, t,
+                    strategies_1, strategies_2,
+                    payoff, player=1
+                ):
+                    remove_2.append(t)
+                    break
+
+        if remove_2:
+            for t in remove_2:
+                strategies_2.remove(t)
+            removed_any = True
+
+        if not removed_any:
+            break
+
+    return strategies_1, strategies_2
+
+
+def print_full_payoff_matrix(payoff, cities):
+    names = [c.name for c in cities]
+
+    print("\nFull payoff matrix (Firm 1, Firm 2):")
+
+    # Header
+    print(" " * 20, end="")
+    for name in names:
+        print(f"{name:>20}", end="")
+    print()
+
+    # Rows
+    for i in names:
+        print(f"{i:>20}", end="")
+        for j in names:
+            p1, p2 = payoff[i][j]
+            cell = f"({int(p1)}, {int(p2)})"
+            print(f"{cell:>20}", end="")
+        print()
+
+
+def main():
+
+    cities = read_cities_from_file(filename)
+
+    if not cities:
+        print("No valid cities loaded.")
+        return
+
+    payoff_matrix = build_payoff_matrix(cities, distance_threshold)
+
+    print_full_payoff_matrix(payoff_matrix, cities)
+
+    surviving_1, surviving_2 = iterated_elimination(cities, payoff_matrix)
+
+    print("\nSurviving locations after iterated elimination:")
+    print("Firm 1:", surviving_1)
+    print("Firm 2:", surviving_2)
+
+main()
