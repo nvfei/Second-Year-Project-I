@@ -1,8 +1,9 @@
 import math
 
-filename = "InputExample.txt"
+filename = "German_cities.txt"
 distance_threshold = 30.0
 
+INF = float("inf")
 class City:
     """
     Immutable representation of a city.
@@ -43,59 +44,24 @@ def dist(city1: City, city2: City) -> float:
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
-class CityGraph:
+
+def build_distance_matrix(cities, distance_threshold):
     """
-    Undirected graph of cities.
-    Nodes are city names.
-    Edges represent geographic proximity.
+    Returns a dictionary of dictionaries:
+    dist[a][b] = geographic distance if <= threshold, else INF
     """
 
-    def __init__(self, cities: list[City], distance_threshold: float):
-        self.cities = cities
-        self.threshold = distance_threshold
+    distance = {c.name: {} for c in cities}
 
-        if distance_threshold <= 0:
-            print("Warning: distance threshold should be positive.")
+    for i in cities:
+        for j in cities:
+            d = dist(i, j)
+            if d <= distance_threshold:
+                distance[i.name][j.name] = d
+            else:
+                distance[i.name][j.name] = INF
 
-        # adjacency list: city name -> set of neighboring city names
-        self.adjacency = {city.name: set() for city in cities}
-
-        self.build_graph()
-
-    def build_graph(self):
-        n = len(self.cities)
-
-        if n == 0:
-            print("Warning: empty city list, graph not built.")
-            return
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                city_i = self.cities[i]
-                city_j = self.cities[j]
-
-                d = haversine_distance(city_i, city_j)
-
-                if d <= self.threshold:
-                    self.adjacency[city_i.name].add(city_j.name)
-                    self.adjacency[city_j.name].add(city_i.name)
-
-    def number_of_vertices(self) -> int:
-        return len(self.adjacency)
-
-    def number_of_edges(self) -> int:
-        return sum(len(neighbors) for neighbors in self.adjacency.values()) // 2
-
-    def neighbors(self, city_name: str) -> set[str]:
-        if city_name not in self.adjacency:
-            print(f"Warning: city '{city_name}' not in graph.")
-            return set()
-        return self.adjacency[city_name]
-
-    def print_graph(self):
-        print("\nCity graph (adjacency list):")
-        for city, neighbors in self.adjacency.items():
-            print(f"{city}: {sorted(neighbors)}")
+    return distance
 
 
 def read_cities_from_file(path: str) -> list[City]:
@@ -154,35 +120,33 @@ def compute_payoff(
     firm1_city: City,
     firm2_city: City,
     cities: list[City],
-    distance_threshold: float
+    distance: dict
 ) -> tuple[float, float]:
     """
-    Computes payoffs for two firms choosing locations firm1_city and firm2_city.
-    No epsilon tolerance is used for distance comparison.
+    Computes payoffs using a precomputed distance matrix.
     """
-
     payoff_1 = 0.0
     payoff_2 = 0.0
 
     for city in cities:
-        d1 = dist(firm1_city, city)
-        d2 = dist(firm2_city, city)
+        d1 = distance[firm1_city.name][city.name]
+        d2 = distance[firm2_city.name][city.name]
 
-        # Nobody reaches the city
-        if d1 > distance_threshold and d2 > distance_threshold:
+        # Nobody reaches
+        if d1 == INF and d2 == INF:
             continue
 
         # Only firm 1 reaches
-        if d1 <= distance_threshold and d2 > distance_threshold:
+        if d1 != INF and d2 == INF:
             payoff_1 += city.population
             continue
 
         # Only firm 2 reaches
-        if d2 <= distance_threshold and d1 > distance_threshold:
+        if d2 != INF and d1 == INF:
             payoff_2 += city.population
             continue
 
-        # Both reach the city
+        # Both reach
         if d1 == d2:
             payoff_1 += city.population / 2
             payoff_2 += city.population / 2
@@ -195,19 +159,18 @@ def compute_payoff(
 
 def build_payoff_matrix(
     cities: List[City],
-    distance_threshold: float
+    distance: dict
 ) -> Dict[str, Dict[str, Tuple[float, float]]]:
     """
     payoff[i][j] = (payoff_firm1, payoff_firm2)
     """
-
     payoff = {}
 
     for city_i in cities:
         payoff[city_i.name] = {}
         for city_j in cities:
             payoff[city_i.name][city_j.name] = compute_payoff(
-                city_i, city_j, cities, distance_threshold
+                city_i, city_j, cities, distance
             )
 
     return payoff
@@ -316,7 +279,8 @@ def main():
         print("No valid cities loaded.")
         return
 
-    payoff_matrix = build_payoff_matrix(cities, distance_threshold)
+    distance = build_distance_matrix(cities, distance_threshold)
+    payoff_matrix = build_payoff_matrix(cities, distance)
 
     print_full_payoff_matrix(payoff_matrix, cities)
 
