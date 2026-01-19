@@ -1,0 +1,335 @@
+import math
+import random
+from typing import List, Tuple
+
+# ################# CONFIGURATION #################
+CITY_FILE = "German_cities.txt"
+DISTANCE_THRESHOLD = 30.0  # km
+
+
+# ################# CITY CLASS #################
+class City:
+
+    def __init__(self, name: str, population: int, latitude: float, longitude: float):
+        self.name = name
+        self.population = population
+        self.latitude = latitude
+        self.longitude = longitude
+
+
+################## GRAPH CLASS (PROBLEM 10) #################
+class Graph:
+    print("\n" + "=" * 60)
+    print("PROBLEM 10")
+    print("=" * 60)
+
+    def __init__(self):
+        self.cities: List[City] = []
+        self.neighbors: dict = {}
+        self.adjacency_matrix: list = []
+
+    def load_cities(self, filename: str):
+
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+
+        for line in lines[1:]:
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                name = parts[0]
+                population = int(parts[1])
+                latitude = float(parts[2])
+                longitude = float(parts[3])
+                self.cities.append(City(name, population, latitude, longitude))
+
+    def calculate_distance(self, city1: City, city2: City) -> float:
+
+        R = 6371.0  # Earth radius in km
+
+        lat1 = math.radians(city1.latitude)
+        lon1 = math.radians(city1.longitude)
+        lat2 = math.radians(city2.latitude)
+        lon2 = math.radians(city2.longitude)
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        return R * c
+
+    def build_network(self, max_distance: float):
+
+        n = len(self.cities)
+        self.neighbors = {city.name: [] for city in self.cities}
+        self.adjacency_matrix = [[0 for _ in range(n)] for _ in range(n)]
+        connections = 0
+
+        for i, city1 in enumerate(self.cities):
+            for j, city2 in enumerate(self.cities):
+                if i != j:
+                    distance = self.calculate_distance(city1, city2)
+                    if distance <= max_distance:
+                        if city2 not in self.neighbors[city1.name]:
+                            self.neighbors[city1.name].append(city2)
+                        self.adjacency_matrix[i][j] = 1
+                        if i < j:  # Count each connection once
+                            connections += 1
+
+        print(f"Created {connections} connections (≤ {max_distance}km) between the cities")
+
+    def print_adjacency_matrix(self):
+        print("\n" + "=" * 60)
+        print("ADJAACENCY MATRIX (1 = connected, 0 = not connected)")
+        print("=" * 60)
+        n = len(self.cities)
+
+        # Print city index reference
+        print("\nCity Index Reference:")
+        for i, city in enumerate(self.cities):
+            print(f"  {i:2d}: {city.name:20s} (pop: {city.population:,})")
+
+        # Print full adjacency matrix
+        print("\nFull Adjacency Matrix:")
+        print("     ", end="")
+        for i in range(n):
+            print(f"{i:2d} ", end="")
+        print()
+
+        for i in range(n):
+            print(f"{i:2d} | ", end="")
+            for j in range(n):
+                print(f" {self.adjacency_matrix[i][j]} ", end="")
+            print()
+
+
+# ################# GAME CLASS  #################
+class SupermarketGame:
+
+    def __init__(self, graph: Graph):
+        self.graph = graph
+        self.payoff_matrix = {}
+        self._build_payoff_matrix()
+
+    def _build_payoff_matrix(self):
+
+        for city_i in self.graph.cities:
+            self.payoff_matrix[city_i.name] = {}
+            for city_j in self.graph.cities:
+                payoff1, payoff2 = self._calculate_payoff(city_i, city_j)
+                self.payoff_matrix[city_i.name][city_j.name] = (payoff1, payoff2)
+
+    def _calculate_payoff(self, firm1_city: City, firm2_city: City) -> Tuple[float, float]:
+
+        payoff1, payoff2 = 0.0, 0.0
+
+        for customer_city in self.graph.cities:
+            dist1 = self.graph.calculate_distance(firm1_city, customer_city)
+            dist2 = self.graph.calculate_distance(firm2_city, customer_city)
+
+            # Check if within threshold
+            can_reach_1 = dist1 <= DISTANCE_THRESHOLD
+            can_reach_2 = dist2 <= DISTANCE_THRESHOLD
+
+            # Nobody can reach this city
+            if not can_reach_1 and not can_reach_2:
+                continue
+
+            # Only firm 1 can reach
+            if can_reach_1 and not can_reach_2:
+                payoff1 += customer_city.population
+                continue
+
+            # Only firm 2 can reach
+            if can_reach_2 and not can_reach_1:
+                payoff2 += customer_city.population
+                continue
+
+            # Both can reach,customers go to nearest
+            if dist1 < dist2:
+                payoff1 += customer_city.population
+            elif dist2 < dist1:
+                payoff2 += customer_city.population
+            else:  # Same distance
+                payoff1 += customer_city.population / 2
+                payoff2 += customer_city.population / 2
+
+        return payoff1, payoff2
+
+    def strictly_dominates(self, a: str, b: str, strategies_1: List[str],
+                           strategies_2: List[str], player: int) -> bool:
+
+        if player == 1:
+            # Firm 1: compare rows
+            for t in strategies_2:
+                if self.payoff_matrix[a][t][0] <= self.payoff_matrix[b][t][0]:
+                    return False
+            return True
+        else:
+            # Firm 2: compare columns
+            for s in strategies_1:
+                if self.payoff_matrix[s][a][1] <= self.payoff_matrix[s][b][1]:
+                    return False
+            return True
+
+    # ################# PROBLEM 11#################
+
+    def iterated_elimination(self) -> Tuple[List[str], List[str]]:
+
+        print("\n" + "=" * 60)
+        print("PROBLEM 11")
+        print("=" * 60)
+
+        strategies_1 = [c.name for c in self.graph.cities]
+        strategies_2 = [c.name for c in self.graph.cities]
+
+        iteration = 0
+        while True:
+            removed_any = False
+
+            # Check Firm 1 strategies
+            remove_1 = []
+            for s in strategies_1:
+                for s_alt in strategies_1:
+                    if s != s_alt and self.strictly_dominates(s_alt, s, strategies_1, strategies_2, player=1):
+                        remove_1.append(s)
+                        break
+
+            if remove_1:
+                for s in remove_1:
+                    strategies_1.remove(s)
+                removed_any = True
+
+            # Check Firm 2 strategies
+            remove_2 = []
+            for t in strategies_2:
+                for t_alt in strategies_2:
+                    if t != t_alt and self.strictly_dominates(t_alt, t, strategies_1, strategies_2, player=2):
+                        remove_2.append(t)
+                        break
+
+            if remove_2:
+                for t in remove_2:
+                    strategies_2.remove(t)
+                removed_any = True
+
+            iteration += 1
+            eliminated = len(remove_1) + len(remove_2)
+            print(f"Iteration {iteration}: eliminated {eliminated} strategies")
+            print(f"  Firm 1: {len(strategies_1)} remaining")
+            print(f"  Firm 2: {len(strategies_2)} remaining")
+
+            if not removed_any:
+                print(f"Equilibriumed after {iteration} iterations")
+                break
+
+        print(f"\nFinal surviving cities:")
+        print(f"  Firm 1: {strategies_1}")
+        print(f"  Firm 2: {strategies_2}")
+
+        return strategies_1, strategies_2
+
+    # ################# PROBLEM 12 #################
+
+    def local_search(self, start1: City = None, start2: City = None,
+                     max_iterations: int = 100) -> Tuple[City, City]:
+
+        print("\n" + "=" * 60)
+        print("PROBLEM 12")
+        print("=" * 60)
+
+        current1 = random.choice(self.graph.cities)
+
+        current2 = random.choice(self.graph.cities)
+
+        print(f"Starting positions: Firm 1 = {current1.name}, Firm 2 = {current2.name}")
+
+        for iteration in range(max_iterations):
+            moved = False
+
+            #  Firm 1's turn
+            # Check ALL cities for potential moves
+            best_move1 = current1
+            best_payoff1 = self.payoff_matrix[current1.name][current2.name][0]
+
+            for city in self.graph.cities:
+                if city == current1:
+                    continue
+
+                payoff = self.payoff_matrix[city.name][current2.name][0]
+                if payoff > best_payoff1:
+                    best_move1 = city
+                    best_payoff1 = payoff
+                    moved = True
+
+            if best_move1 != current1:
+                current1 = best_move1
+                print(f"Iteration {iteration + 1}: Firm 1 moved to {current1.name}")
+
+            #  Firm 2's turn
+            # Check ALL cities for potential moves
+            best_move2 = current2
+            best_payoff2 = self.payoff_matrix[current1.name][current2.name][1]
+
+            for city in self.graph.cities:
+                if city == current2:
+                    continue
+
+                payoff = self.payoff_matrix[current1.name][city.name][1]
+                if payoff > best_payoff2:
+                    best_move2 = city
+                    best_payoff2 = payoff
+                    moved = True
+
+            if best_move2 != current2:
+                current2 = best_move2
+                print(f"Iteration {iteration + 1}: Firm 2 moved to {current2.name}")
+
+            # Stop if no firm moved in this iteration
+            if not moved:
+                print(f"\nStopped after {iteration + 1} iterations (no more moves possible)")
+                break
+
+        final_p1, final_p2 = self.payoff_matrix[current1.name][current2.name]
+        print(f"\nFinal positions: Firm 1 = {current1.name}, Firm 2 = {current2.name}")
+        print(f"Final payoffs: Firm 1 = {final_p1:.0f} customers, Firm 2 = {final_p2:.0f} customers")
+
+        return current1, current2
+
+
+# |||||||||||||||||||||||||||||||||||||||||| MAIN |||||||||||||||||||||||||||||||||||||||||||||
+def main():
+    print("=" * 60)
+    print("\n")
+    print("Programming assignement SYP1")
+    print("\n")
+    print("Charles Wibault (i6316176)")
+    print("\n")
+    print("Floris Hofs (i6383591)")
+    print("\n")
+    print("Timofei Novokshonov (i6361968))")
+    print("\n")
+    print("=" * 60)
+
+    ################## PROBLEM 10 #################
+
+    graph = Graph()
+    graph.load_cities(CITY_FILE)
+    graph.build_network(DISTANCE_THRESHOLD)
+
+    # Print adjacency matrix
+    graph.print_adjacency_matrix()
+
+    # Create game
+    game = SupermarketGame(graph)
+
+    ################## PROBLEM 11 #################
+    surviving1, surviving2 = game.iterated_elimination()
+
+    ################## PROBLEM 12 #################
+    final1, final2 = game.local_search()
+
+
+if __name__ == "__main__":
+    main()
