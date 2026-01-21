@@ -1,0 +1,609 @@
+import math
+import random
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Iterable, Any
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+CITY_FILE = "German_cities.txt"
+
+EDGE_DISTANCE_THRESHOLD_KM = 30.0
+
+CUSTOMER_MAX_DISTANCE_KM: Optional[float] = None
+
+ENABLE_PRICES_AND_BUDGET = True
+PRICE_SET = [1.0, 5.0, 10.0]
+CUSTOMER_BUDGET = 60.0
+
+LOCAL_SEARCH_MAX_ITERS = 200
+LOCAL_SEARCH_USE_NEIGHBORS = True
+LOCAL_SEARCH_CYCLE_DETECTION = True
+
+RANDOM_SEED = 7
+
+
+# ============================================================
+# DATA STRUCTURES (Problem 10)
+# ============================================================
+@dataclass(frozen=True)
+class City:
+    name: str
+    population: int
+    latitude: float
+    longitude: float
+
+
+class Graph:
+    """Graph of cities; edges represent "close" cities (neighbourhood for local search)."""
+
+    def __init__(self) -> None:
+        self.cities: List[City] = []
+        self.neighbors: Dict[str, List[str]] = {}
+        self._city_by_name: Dict[str, City] = {}
+
+    def load_cities(self, filename: str) -> None:
+        with open(filename, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+
+        try:
+            expected_n = int(lines[0])
+        except ValueError:
+            raise ValueError("First line must be an integer with the number of cities")
+
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name = parts[0]
+            population = int(parts[1])
+            latitude = float(parts[2])
+            longitude = float(parts[3])
+            self.cities.append(City(name, population, latitude, longitude))
+
+        if expected_n != len(self.cities):
+            print(
+                f"Warning: file says {expected_n} cities, but parsed {len(self.cities)} cities."
+            )
+
+        self._city_by_name = {c.name: c for c in self.cities}
+
+    @staticmethod
+    def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Great-circle distance between two points on Earth."""
+        R = 6371.0
+        lat1r, lon1r = math.radians(lat1), math.radians(lon1)
+        lat2r, lon2r = math.radians(lat2), math.radians(lon2)
+        dlat = lat2r - lat1r
+        dlon = lon2r - lon1r
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1r) * math.cos(lat2r) * math.sin(dlon / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def distance_km(self, a: City, b: City) -> float:
+        return self.haversine_km(a.latitude, a.longitude, b.latitude, b.longitude)
+
+    def build_network(self, max_distance_km: float) -> int:
+        """Connect two cities iff their distance is <= max_distance_km."""
+        self.neighbors = {c.name: [] for c in self.cities}
+        connections = 0
+        n = len(self.cities)
+        for i in range(n):
+            for j in range(i + 1, n):
+                c1, c2 = self.cities[i], self.cities[j]
+                d = self.distance_km(c1, c2)
+                if d <= max_distance_km:
+                    self.neighbors[c1.name].append(c2.name)
+                    self.neighbors[c2.name].append(c1.name)
+                    connections += 1
+        return connections
+
+    def city(self, name: str) -> City:
+        return self._city_by_name[name]
+
+    def print_adjacency_matrix(self) -> None:
+        """Print a full adjacency matrix (1=connected, 0=not connected).
+
+        This is only for reporting/debugging and does not affect any algorithms.
+        """
+        n = len(self.cities)
+        idx = {self.cities[i].name: i for i in range(n)}
+        matrix = [[0] * n for _ in range(n)]
+        for u, nbrs in self.neighbors.items():
+            i = idx[u]
+            for v in nbrs:
+                j = idx[v]
+                matrix[i][j] = 1
+
+        print("\n" + "=" * 60)
+        print("ADJACENCY MATRIX (1 = connected, 0 = not connected)")
+        print("=" * 60)
+        print("\nCity Index Reference:")
+        for i, c in enumerate(self.cities):
+            print(f"  {i:2d}: {c.name:20s} (pop: {c.population:,})")
+
+        print("\nFull Adjacency Matrix:")
+        print("     ", end="")
+        for i in range(n):
+            print(f"{i:2d} ", end="")
+        print()
+        for i in range(n):
+            print(f"{i:2d} | ", end="")
+            for j in range(n):
+                print(f" {matrix[i][j]} ", end="")
+            print()
+
+
+# ============================================================
+# GAME MODEL
+# ============================================================
+Strategy = Tuple[str, float]
+
+
+class SupermarketGame:
+    """Two-player location game with optional price+budget extension."""
+
+    def __init__(
+        self,
+        graph: Graph,
+        customer_max_distance_km: Optional[float] = None,
+        enable_prices_and_budget: bool = False,
+        price_set: Optional[List[float]] = None,
+        customer_budget: Optional[float] = None,
+        payoff_mode: str = "customers",
+    ) -> None:
+        self.graph = graph
+        self.customer_max_distance_km = customer_max_distance_km
+        self.enable_prices_and_budget = enable_prices_and_budget
+        self.price_set = price_set or [0.0]
+        self.customer_budget = customer_budget
+        if payoff_mode not in {"customers", "revenue"}:
+            raise ValueError("payoff_mode must be 'customers' or 'revenue'")
+        self.payoff_mode = payoff_mode
+
+        self.strategies: List[Strategy] = self._build_strategy_space()
+        self.payoff: Dict[Strategy, Dict[Strategy, Tuple[float, float]]] = {}
+        self._build_payoff_matrix()
+
+    def _build_strategy_space(self) -> List[Strategy]:
+        if not self.enable_prices_and_budget:
+            return [(c.name, 0.0) for c in self.graph.cities]
+        return [(c.name, p) for c in self.graph.cities for p in self.price_set]
+
+    def _feasible(self, dist_km: float, price: float) -> bool:
+        if not self.enable_prices_and_budget:
+            if self.customer_max_distance_km is None:
+                return True
+            return dist_km <= self.customer_max_distance_km
+
+        if self.customer_max_distance_km is not None and dist_km > self.customer_max_distance_km:
+            return False
+        if self.customer_budget is None:
+            return True
+        return (dist_km + price) <= self.customer_budget
+
+    def _customer_cost(self, dist_km: float, price: float) -> float:
+        if not self.enable_prices_and_budget:
+            return dist_km
+        return dist_km + price
+
+    def _add_payoff(self, current: float, population: int, price: float) -> float:
+        if self.payoff_mode == "customers":
+            return current + population
+        return current + population * price
+
+    def _calculate_payoff(self, s1: Strategy, s2: Strategy) -> Tuple[float, float]:
+        loc1, p1 = s1
+        loc2, p2 = s2
+        c1 = self.graph.city(loc1)
+        c2 = self.graph.city(loc2)
+
+        payoff1, payoff2 = 0.0, 0.0
+
+        for customer_city in self.graph.cities:
+            d1 = self.graph.distance_km(c1, customer_city)
+            d2 = self.graph.distance_km(c2, customer_city)
+
+            ok1 = self._feasible(d1, p1)
+            ok2 = self._feasible(d2, p2)
+
+            if not ok1 and not ok2:
+                continue
+            if ok1 and not ok2:
+                payoff1 = self._add_payoff(payoff1, customer_city.population, p1)
+                continue
+            if ok2 and not ok1:
+                payoff2 = self._add_payoff(payoff2, customer_city.population, p2)
+                continue
+
+            cost1 = self._customer_cost(d1, p1)
+            cost2 = self._customer_cost(d2, p2)
+            if cost1 < cost2:
+                payoff1 = self._add_payoff(payoff1, customer_city.population, p1)
+            elif cost2 < cost1:
+                payoff2 = self._add_payoff(payoff2, customer_city.population, p2)
+            else:
+                if self.payoff_mode == "customers":
+                    payoff1 += customer_city.population / 2
+                    payoff2 += customer_city.population / 2
+                else:
+                    payoff1 += (customer_city.population * p1) / 2
+                    payoff2 += (customer_city.population * p2) / 2
+
+        return payoff1, payoff2
+
+    def _build_payoff_matrix(self) -> None:
+        for s1 in self.strategies:
+            self.payoff[s1] = {}
+            for s2 in self.strategies:
+                self.payoff[s1][s2] = self._calculate_payoff(s1, s2)
+
+    def strictly_dominates(
+        self,
+        a: Strategy,
+        b: Strategy,
+        remaining_1: List[Strategy],
+        remaining_2: List[Strategy],
+        player: int,
+    ) -> bool:
+        if player == 1:
+            for t in remaining_2:
+                if self.payoff[a][t][0] <= self.payoff[b][t][0]:
+                    return False
+            return True
+        else:
+            for s in remaining_1:
+                if self.payoff[s][a][1] <= self.payoff[s][b][1]:
+                    return False
+            return True
+
+    # ---------------- Problem 11 ----------------
+    def iterated_elimination(self) -> Tuple[List[Strategy], List[Strategy]]:
+        remaining_1 = self.strategies.copy()
+        remaining_2 = self.strategies.copy()
+
+        iteration = 0
+        while True:
+            removed_any = False
+
+            # Player 1
+            remove_1: List[Strategy] = []
+            for s in remaining_1:
+                for s_alt in remaining_1:
+                    if s != s_alt and self.strictly_dominates(s_alt, s, remaining_1, remaining_2, 1):
+                        remove_1.append(s)
+                        break
+
+            for s in remove_1:
+                if s in remaining_1:
+                    remaining_1.remove(s)
+                    removed_any = True
+
+            # Player 2
+            remove_2: List[Strategy] = []
+            for t in remaining_2:
+                for t_alt in remaining_2:
+                    if t != t_alt and self.strictly_dominates(t_alt, t, remaining_1, remaining_2, 2):
+                        remove_2.append(t)
+                        break
+
+            for t in remove_2:
+                if t in remaining_2:
+                    remaining_2.remove(t)
+                    removed_any = True
+
+            iteration += 1
+            eliminated = len(remove_1) + len(remove_2)
+            print(f"Iteration {iteration}: eliminated {eliminated} strategies")
+            print(f"  Firm 1: {len(remaining_1)} remaining")
+            print(f"  Firm 2: {len(remaining_2)} remaining")
+            if not removed_any:
+                print(f"Equilibriumed after {iteration} iterations")
+                break
+
+        return remaining_1, remaining_2
+
+    # ---------------- Problem 12 (and used in 13/14) ----------------
+    def local_search(
+        self,
+        start1: Optional[Strategy] = None,
+        start2: Optional[Strategy] = None,
+        max_iterations: int = 100,
+        use_neighbors: bool = True,
+        cycle_detection: bool = True,
+        stopping: str = "no_improvement",
+        verbose: bool = False,
+    ) -> Tuple[Strategy, Strategy, int, str]:
+        """Best-response dynamics with optional neighbour restriction.
+
+        Returns: (final_strategy1, final_strategy2, iterations_used, stop_reason)
+        """
+        if start1 is None:
+            start1 = random.choice(self.strategies)
+        if start2 is None:
+            start2 = random.choice(self.strategies)
+
+        current1, current2 = start1, start2
+
+        if verbose:
+            print(
+                f"Starting positions: Firm 1 = {current1[0]}, Firm 2 = {current2[0]}"
+            )
+        seen = set()
+
+        def candidate_moves(current: Strategy) -> Iterable[Strategy]:
+            loc, price = current
+            if use_neighbors:
+                loc_candidates = self.graph.neighbors.get(loc, [])
+            else:
+                loc_candidates = [c.name for c in self.graph.cities]
+
+            if self.enable_prices_and_budget:
+                price_candidates = self.price_set
+            else:
+                price_candidates = [0.0]
+
+            for new_loc in loc_candidates:
+                for new_p in price_candidates:
+                    yield (new_loc, float(new_p))
+
+            if self.enable_prices_and_budget:
+                for new_p in price_candidates:
+                    yield (loc, float(new_p))
+
+        for it in range(1, max_iterations + 1):
+            if cycle_detection:
+                state = (current1, current2)
+                if state in seen:
+                    return current1, current2, it - 1, "cycle_detected"
+                seen.add(state)
+
+            moved = False
+
+            # Firm 1 best response
+            best1 = current1
+            best1_pay = self.payoff[current1][current2][0]
+            for cand in candidate_moves(current1):
+                val = self.payoff[cand][current2][0]
+                if val > best1_pay:
+                    best1_pay = val
+                    best1 = cand
+            if best1 != current1:
+                current1 = best1
+                moved = True
+                if verbose:
+                    print(f"Iteration {it}: Firm 1 moved to {current1[0]}")
+
+            # Firm 2 best response
+            best2 = current2
+            best2_pay = self.payoff[current1][current2][1]
+            for cand in candidate_moves(current2):
+                val = self.payoff[current1][cand][1]
+                if val > best2_pay:
+                    best2_pay = val
+                    best2 = cand
+            if best2 != current2:
+                current2 = best2
+                moved = True
+                if verbose:
+                    print(f"Iteration {it}: Firm 2 moved to {current2[0]}")
+
+            if stopping == "no_improvement" and not moved:
+                if verbose:
+                    print(f"\nStopped after {it} iterations (no more moves possible)\n")
+                    print(f"Final positions: Firm 1 = {current1[0]}, Firm 2 = {current2[0]}")
+                return current1, current2, it, "no_improvement"
+
+        if verbose:
+            print(f"\nStopped after {max_iterations} iterations (max iterations reached)\n")
+            print(f"Final positions: Firm 1 = {current1[0]}, Firm 2 = {current2[0]}")
+        return current1, current2, max_iterations, "max_iterations"
+
+
+# ============================================================
+# PROBLEM 13: INVESTIGATION
+# ============================================================
+
+def run_problem_13_investigation(graph: Graph) -> None:
+    print("\n" + "=" * 60)
+    print("PROBLEM 13: Investigation of local search")
+    print("=" * 60)
+
+    edge_thresholds = [20.0, 30.0, 40.0, 100,0]
+    runs_per_setting = 30
+
+    for thr in edge_thresholds:
+        connections = graph.build_network(thr)
+        print(f"\n--- Edge threshold = {thr:.0f} km | edges = {connections} ---")
+
+        game = SupermarketGame(
+            graph,
+            customer_max_distance_km=CUSTOMER_MAX_DISTANCE_KM,
+            enable_prices_and_budget=ENABLE_PRICES_AND_BUDGET,
+            price_set=PRICE_SET,
+            customer_budget=CUSTOMER_BUDGET,
+            payoff_mode="customers",
+        )
+
+        outcomes: Dict[Tuple[Strategy, Strategy], int] = {}
+        stop_reasons: Dict[str, int] = {}
+        iters: List[int] = []
+
+        for _ in range(runs_per_setting):
+            f1, f2, used, reason = game.local_search(
+                max_iterations=LOCAL_SEARCH_MAX_ITERS,
+                use_neighbors=True,
+                cycle_detection=True,
+                stopping="no_improvement",
+            )
+            outcomes[(f1, f2)] = outcomes.get((f1, f2), 0) + 1
+            stop_reasons[reason] = stop_reasons.get(reason, 0) + 1
+            iters.append(used)
+
+        top = sorted(outcomes.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        avg_iter = sum(iters) / len(iters)
+        print(f"Average iterations until stop: {avg_iter:.1f}")
+        print(f"Stop reasons: {stop_reasons}")
+        print("Most common final outcomes (Firm1, Firm2) with frequency:")
+        for (s1, s2), cnt in top:
+            print(f"  {cnt:2d}x  F1={s1}  |  F2={s2}")
+
+    graph.build_network(EDGE_DISTANCE_THRESHOLD_KM)
+    print("\n--- Stopping criteria comparison (threshold fixed) ---")
+
+    game = SupermarketGame(
+        graph,
+        customer_max_distance_km=CUSTOMER_MAX_DISTANCE_KM,
+        enable_prices_and_budget=ENABLE_PRICES_AND_BUDGET,
+        price_set=PRICE_SET,
+        customer_budget=CUSTOMER_BUDGET,
+        payoff_mode="customers",
+    )
+
+    configs = [
+        {"cycle_detection": True, "stopping": "no_improvement"},
+        {"cycle_detection": False, "stopping": "no_improvement"},
+        {"cycle_detection": True, "stopping": "max_iter"},
+    ]
+
+    for cfg in configs:
+        reasons: Dict[str, int] = {}
+        used_list: List[int] = []
+        for _ in range(30):
+            _, _, used, reason = game.local_search(
+                max_iterations=50,
+                use_neighbors=True,
+                cycle_detection=cfg["cycle_detection"],
+                stopping=cfg["stopping"],
+            )
+            reasons[reason] = reasons.get(reason, 0) + 1
+            used_list.append(used)
+        print(
+            f"cycle_detection={cfg['cycle_detection']}, stopping={cfg['stopping']} -> "
+            f"reasons={reasons}, avg_iters={sum(used_list)/len(used_list):.1f}"
+        )
+
+
+# ============================================================
+# PROBLEM 14: EXTENSIONS
+# ============================================================
+
+def run_problem_14_extensions(graph: Graph) -> None:
+    print("\n" + "=" * 60)
+    print("PROBLEM 14: Extensions")
+    print("=" * 60)
+
+    graph.build_network(EDGE_DISTANCE_THRESHOLD_KM)
+
+    base_game = SupermarketGame(
+        graph,
+        customer_max_distance_km=None,
+        enable_prices_and_budget=False,
+        payoff_mode="customers",
+    )
+
+    base_surv1, base_surv2 = base_game.iterated_elimination()
+    print(f"\nBaseline (no price/budget):")
+    print(f"  Surviving strategies Firm 1: {len(base_surv1)}")
+    print(f"  Surviving strategies Firm 2: {len(base_surv2)}")
+
+    ext_game = SupermarketGame(
+        graph,
+        customer_max_distance_km=CUSTOMER_MAX_DISTANCE_KM,
+        enable_prices_and_budget=True,
+        price_set=PRICE_SET,
+        customer_budget=CUSTOMER_BUDGET,
+        payoff_mode="revenue",
+    )
+
+    ext_surv1, ext_surv2 = ext_game.iterated_elimination()
+    print(f"\nExtension (prices + budget, cost=distance+price, budget={CUSTOMER_BUDGET}):")
+    print(f"  Strategy set size per firm: {len(ext_game.strategies)} (= cities * |prices|)")
+    print(f"  Surviving strategies Firm 1: {len(ext_surv1)}")
+    print(f"  Surviving strategies Firm 2: {len(ext_surv2)}")
+
+    print("  Example surviving strategies (first 10):")
+    for s in ext_surv1[:10]:
+        print(f"    {s}")
+
+    outcomes: Dict[Tuple[Strategy, Strategy], int] = {}
+    for _ in range(50):
+        f1, f2, _, _ = ext_game.local_search(
+            max_iterations=LOCAL_SEARCH_MAX_ITERS,
+            use_neighbors=LOCAL_SEARCH_USE_NEIGHBORS,
+            cycle_detection=LOCAL_SEARCH_CYCLE_DETECTION,
+            stopping="no_improvement",
+        )
+        outcomes[(f1, f2)] = outcomes.get((f1, f2), 0) + 1
+
+    top = sorted(outcomes.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    print("\nLocal search (extension) - most frequent final outcomes:")
+    for (s1, s2), cnt in top:
+        p1, p2 = ext_game.payoff[s1][s2]
+        print(f"  {cnt:2d}x  F1={s1} (utility={p1:.0f})  |  F2={s2} (utility={p2:.0f})")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main() -> None:
+    random.seed(RANDOM_SEED)
+
+    print("=" * 60)
+    print("Programming assignment SYP1 - Problems 10-14")
+    print("=" * 60)
+
+    graph = Graph()
+    graph.load_cities(CITY_FILE)
+
+    # ----------------------------
+    # PROBLEM 10
+    # ----------------------------
+    print("\n" + "=" * 60)
+    print("PROBLEM 10")
+    print("=" * 60)
+    connections = graph.build_network(EDGE_DISTANCE_THRESHOLD_KM)
+    print(f"Created {connections} connections (<= {EDGE_DISTANCE_THRESHOLD_KM}km) between the cities")
+    graph.print_adjacency_matrix()
+
+    # ----------------------------
+    # PROBLEM 11
+    # ----------------------------
+    print("\n" + "=" * 60)
+    print("PROBLEM 11")
+    print("=" * 60)
+    legacy_game = SupermarketGame(
+        graph,
+        customer_max_distance_km=EDGE_DISTANCE_THRESHOLD_KM,
+        enable_prices_and_budget=False,
+        payoff_mode="customers",
+    )
+    remaining_1, remaining_2 = legacy_game.iterated_elimination()
+    print(f"\nFinal surviving cities:")
+    print(f"  Firm 1: {[s[0] for s in remaining_1]}")
+    print(f"  Firm 2: {[s[0] for s in remaining_2]}")
+
+    # ----------------------------
+    # PROBLEM 12
+    # ----------------------------
+    print("\n" + "=" * 60)
+    print("PROBLEM 12")
+    print("=" * 60)
+    final1, final2, iters, reason = legacy_game.local_search(
+        max_iterations=100,
+        use_neighbors=False,
+        cycle_detection=False,
+        stopping="no_improvement",
+        verbose=True,
+    )
+    p1, p2 = legacy_game.payoff[final1][final2]
+    print(f"\nFinal payoffs: Firm 1 = {p1:.0f} customers, Firm 2 = {p2:.0f} customers")
+
+    # Problems 13 and 14 (investigation + revenue extension)
+    run_problem_13_investigation(graph)
+    run_problem_14_extensions(graph)
+
+
+if __name__ == "__main__":
+    main()
